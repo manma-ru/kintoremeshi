@@ -709,6 +709,101 @@ export const FOODS = [
     "estimatedValue": false
   },
   {
+    "id": "pasta_dry",
+    "code": "01063",
+    "name": "スパゲッティ（乾麺・ゆでる前）",
+    "officialName": "こむぎ ［マカロニ・スパゲッティ類］ マカロニ・スパゲッティ 乾",
+    "state": "raw",
+    "allergens": [
+      "小麦"
+    ],
+    "per100g": {
+      "kcal": 347.0,
+      "protein": 12.9,
+      "fat": 1.8,
+      "carb": 73.1
+    },
+    "estimatedValue": false
+  },
+  {
+    "id": "carrot_raw",
+    "code": "06214",
+    "name": "にんじん（皮なし・生）",
+    "officialName": "（にんじん類） にんじん 根 皮なし 生",
+    "state": "raw",
+    "allergens": [],
+    "per100g": {
+      "kcal": 32.0,
+      "protein": 0.7,
+      "fat": 0.2,
+      "carb": 8.8
+    },
+    "estimatedValue": false
+  },
+  {
+    "id": "tomato_can",
+    "code": "06184",
+    "name": "トマト缶（ホール・食塩無添加）",
+    "officialName": "（トマト類） 加工品 ホール 食塩無添加",
+    "state": "as_sold",
+    "allergens": [],
+    "per100g": {
+      "kcal": 21.0,
+      "protein": 0.9,
+      "fat": 0.2,
+      "carb": 4.4
+    },
+    "estimatedValue": false
+  },
+  {
+    "id": "spinach_frozen",
+    "code": "06372",
+    "name": "冷凍ほうれんそう（ゆで）",
+    "officialName": "ほうれんそう 葉 冷凍 ゆで",
+    "state": "cooked",
+    "allergens": [],
+    "per100g": {
+      "kcal": 26.0,
+      "protein": 3.7,
+      "fat": 0.5,
+      "carb": 4.3
+    },
+    "estimatedValue": false
+  },
+  {
+    "id": "ketchup",
+    "code": "17036",
+    "name": "トマトケチャップ",
+    "officialName": "＜調味料類＞ （トマト加工品類） トマトケチャップ",
+    "state": "as_sold",
+    "allergens": [],
+    "per100g": {
+      "kcal": 116.0,
+      "protein": 1.6,
+      "fat": 0.2,
+      "carb": 27.6
+    },
+    "estimatedValue": false
+  },
+  {
+    "id": "curry_roux",
+    "code": "17051",
+    "name": "カレールウ",
+    "officialName": "＜調味料類＞ （ルウ類） カレールウ",
+    "state": "as_sold",
+    "allergens": [
+      "小麦",
+      "乳"
+    ],
+    "per100g": {
+      "kcal": 474.0,
+      "protein": 6.5,
+      "fat": 34.1,
+      "carb": 44.7
+    },
+    "estimatedValue": false
+  },
+  {
     "id": "oyakodon_topping",
     "code": "18030",
     "name": "親子丼の具",

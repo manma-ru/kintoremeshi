@@ -1,6 +1,6 @@
 {
-  "name": "きんトレごはん",
-  "short_name": "きんトレごはん",
+  "name": "Tsumiage",
+  "short_name": "Tsumiage",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#f6f7f5",

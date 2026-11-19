@@ -65,6 +65,24 @@ import {
 } from './state.js';
 import { weeklyReview, applyProposal, dismissProposal } from './review.js';
 import { esc, kcal, grams, yen, num1, mmdd, restText } from './format.js';
+import { RECIPES, RECIPE_BY_ID, EQUIPMENT_K, SEASONINGS, SKILLS, BUY_INFO, PREPARED_DAYS } from './recipes.js';
+import {
+  WHERE_LABEL,
+  addPantry,
+  addDaysStr,
+  preparedItems,
+  expiringSoon,
+  cookRecipe,
+  canMake,
+  pantryHint,
+  buildShoppingPlan,
+  completeShopping,
+  cookingLevel,
+  nextChallenge,
+  SKILL_MASTER_COUNT,
+} from './kitchen.js';
+import { weeklyHistory, personalRecords, badges, totals as progressTotals, skillTree } from './progress.js';
+import { recipeToTemplate } from './meals.js';
 
 const root = document.getElementById('app');
 let state = loadState();
@@ -78,6 +96,9 @@ const ui = {
   addMealOpen: false,
   addMode: 'food',
   menuMode: 'similar',
+  openRecipe: null,
+  cookForm: null,
+  editPantry: null,
   menuFromRec: null,
   flash: '',
 };
@@ -315,6 +336,7 @@ function mealContext(date) {
     places,
     budgetYen: budgetYen != null ? Math.floor(budgetYen) : null,
     pool: poolFor(state),
+    hint: (t) => pantryHint(state.kitchen, t),
     eatenRecords,
     remainingSlots: slot === 'snack' ? 1 : Math.max(1, rem.length),
     targets,
@@ -405,7 +427,7 @@ function todayView() {
     ${Object.keys(ov).length ? `<button class="link" data-action="ov-clear">今日の変更を元に戻す</button>` : ''}
   </details></section>`;
 
-  return `${summary}${cond}${trainingCard(date, session)}${mealsCard(date, ctx, sug, selectedId, totals, proj, targets)}`;
+  return `${summary}${progressStrip()}${cond}${trainingCard(date, session)}${mealsCard(date, ctx, sug, selectedId, totals, proj, targets)}`;
 }
 
 function trainingCard(date, session) {
@@ -530,7 +552,16 @@ function mealsCard(date, ctx, sug, selectedId, totals, proj, targets) {
       return `<li class="cand ${sel ? 'sel' : ''}">
         <div class="cand-head"><b>${esc(t.name)}</b> <span class="tag">${esc(placeName(state, t.place))}</span>${t.user ? ' <span class="tag ok">登録メニュー</span>' : ''}${
           c.needsIngredientCheck ? ' <span class="tag warn">原材料を要確認</span>' : ''
-        }</div>
+        }${t.prepared ? ' <span class="tag ok">作り置き</span>' : ''}${t.level ? ` <span class="tag">${'★'.repeat(t.level)} 料理Lv${t.level}</span>` : ''}</div>
+        ${
+          c.hint
+            ? c.hint.ok
+              ? '<div class="small ok-text">✓ 家にある食材で作れる</div>'
+              : `<div class="small">家に足りない：${esc(c.hint.missing.map((m) => FOOD_BY_ID[m.foodId]?.name ?? m.foodId).join('、'))}</div>`
+            : ''
+        }
+        ${t.uncheckedEquipment?.length ? `<div class="muted small">使う道具（未回答）：${esc(t.uncheckedEquipment.map((k) => EQUIPMENT_K[k]).join('、'))}</div>` : ''}
+        ${t.recipeId ? `<button class="link" data-action="goto-recipe" data-id="${t.recipeId}">作り方を見る</button>` : ''}
         ${
           c.nutritionUnknown
             ? ''
@@ -1017,16 +1048,310 @@ function settingsView() {
     </section>`;
 }
 
+// ---------------------------------------------------------------- 達成（成長タブ・今日の帯）
+
+function ring(value, max, label, sub) {
+  const r = 22;
+  const c = 2 * Math.PI * r;
+  const p = max > 0 ? Math.min(1, value / max) : 0;
+  return `<div class="ring"><svg viewBox="0 0 56 56" width="56" height="56" aria-hidden="true">
+      <circle cx="28" cy="28" r="${r}" class="ring-bg"/>
+      <circle cx="28" cy="28" r="${r}" class="ring-fg ${p >= 1 ? 'full' : ''}" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - p)}" transform="rotate(-90 28 28)"/>
+      <text x="28" y="33" text-anchor="middle" class="ring-t">${value}${max ? `/${max}` : ''}</text></svg>
+    <div class="small"><b>${esc(label)}</b>${sub ? `<div class="muted">${esc(sub)}</div>` : ''}</div></div>`;
+}
+
+function progressStrip() {
+  const h = weeklyHistory(state, todayStr(), 12);
+  const w = h.current;
+  return `<section class="card strip">
+    <div class="rings">
+      ${ring(w.done, w.target, '今週の筋トレ', w.achieved ? '目標クリア！' : w.target ? `目標 週${w.target}回` : '曜日が未設定')}
+      ${ring(w.mealDays, 7, '食事を記録した日', '')}
+      ${ring(w.cooked, 0, '自炊', '今週')}
+    </div>
+    <div class="small">続けている週：<b>${h.streak}週</b>（1週休んでも途切れません）${ui.tab === 'growth' ? '' : '<button class="link" data-action="goto" data-tab="growth">成長を見る</button>'}</div>
+  </section>`;
+}
+
+function growthView() {
+  const today = todayStr();
+  const h = weeklyHistory(state, today, 12);
+  const t = progressTotals(state);
+  const pr = personalRecords(state.workouts);
+  const bs = badges(state, today);
+  const tree = skillTree(state.kitchen.cookLog);
+  const level = cookingLevel(state.kitchen.cookLog);
+  const next = nextChallenge(state.kitchen);
+  // 新しいバッジは一度見たら「NEW」を外す
+  const earned = bs.filter((b) => b.got).map((b) => b.id);
+  if (earned.some((id) => !(state.badgesSeen ?? []).includes(id))) {
+    state.badgesSeen = earned;
+    saveState(state);
+  }
+  const grid = h.weeks
+    .map((w) => {
+      const cls = !w.started ? 'pre' : w.achieved ? 'ok' : w.finished ? 'miss' : 'now';
+      return `<div class="wk ${cls}" title="${mmdd(w.weekStart)}の週：${w.done}回"><span>${w.started ? w.done : ''}</span></div>`;
+    })
+    .join('');
+  const prList = Object.entries(pr.best)
+    .map(([exId, b]) => {
+      const ex = EXERCISE_BY_ID[exId];
+      const v = b.maxKg ? `${num1(b.maxKg.kg)}kg × ${b.maxKg.reps}回（${mmdd(b.maxKg.date)}）` : b.maxReps ? `${b.maxReps.reps}${ex.unit === 'sec' ? '秒' : '回'}（${mmdd(b.maxReps.date)}）` : '';
+      return v ? `<li><b>${esc(ex.name)}</b>：${v}</li>` : '';
+    })
+    .join('');
+  return `<section class="card">
+      <h2>続けた記録</h2>
+      ${progressStrip().replace('<section class="card strip">', '<div>').replace(/<\/section>$/, '</div>')}
+      <h3>直近12週（週の目標を達成した週が緑）</h3>
+      <div class="wkgrid">${grid}</div>
+      <p class="small">達成した週：合計 <b>${h.achievedTotal}</b> 週／12週</p>
+      <details><summary>この仕組みの考え方</summary>
+        <p class="small">ほめる対象は体重などの「結果」ではなく、筋トレ・記録・自炊といった「行動」です。結果は自分で決めきれませんが、行動は自分で決められます。連続記録は1週休んでも途切れず、2週続けて未達成のときだけリセットします。習慣化の研究では、1回抜けても習慣の形成にはほとんど影響しませんでした。週の目標（週2回）は、主要な筋肉を週2回以上動かすというACSMの目安に合わせています。</p>
+        ${srcLinks(['lally2010_habit', 'acsm2026_rt', 'app'])}
+      </details>
+    </section>
+    <section class="card"><h2>バッジ</h2>
+      <div class="badges">${bs
+        .map((b) => `<div class="badge ${b.got ? 'got' : ''}"><div class="b-ico">${b.got ? '🏅' : '・'}</div><div><b>${esc(b.name)}</b>${b.isNew ? ' <span class="tag ok">NEW</span>' : ''}<div class="muted small">${esc(b.desc)}</div></div></div>`)
+        .join('')}</div>
+    </section>
+    <section class="card"><h2>自己ベスト</h2>
+      ${prList ? `<ul class="plain">${prList}</ul>` : '<p class="muted">記録がたまると、ここに自己ベストが出ます。</p>'}
+      <p class="muted small">重さは「計画の下限回数以上できた重さ」で数えます。限界まで追い込む必要はありません。痛みを記録したセットは数えません。</p>
+    </section>
+    <section class="card"><h2>料理：レベル ${level}</h2>
+      ${next ? `<p>次の挑戦：<b>${esc(next.name)}</b> <button class="link" data-action="goto-recipe" data-id="${next.id}">作り方</button></p>` : ''}
+      <ul class="plain skills">${tree
+        .map(
+          (s) => `<li><div><b>${esc(s.name)}</b> ${s.mastered ? '<span class="tag ok">習得</span>' : `<span class="muted small">${s.count}/${SKILL_MASTER_COUNT}回</span>`}</div>
+          <div class="bar"><span style="width:${Math.min(100, (s.count / SKILL_MASTER_COUNT) * 100)}%"></span></div>
+          <div class="muted small">${esc(s.tip)}</div></li>`,
+        )
+        .join('')}</ul>
+      <p class="muted small">同じスキルを使うレシピを${SKILL_MASTER_COUNT}回作ると「習得」（くり返しが上達の基本、というアプリの基準）。レベルは、そのレベルのレシピを2回作ると上がります。</p>
+    </section>
+    <section class="card"><h2>これまでの合計</h2>
+      <p>筋トレ <b>${t.workouts}</b> 回・<b>${t.sets}</b> セット／自炊 <b>${t.cooked}</b> 回／食事の記録 <b>${t.mealsRecorded}</b> 回</p>
+    </section>
+    <h2 class="section-title">週の振り返り</h2>
+    ${reviewView()}`;
+}
+
+// ---------------------------------------------------------------- 台所
+
+function kitchenView() {
+  return `${kitchenQuestions()}${pantryCard()}${shoppingCard()}${recipesCard()}`;
+}
+
+function kitchenQuestions() {
+  const k = state.kitchen;
+  const unansweredEq = Object.keys(EQUIPMENT_K).filter((key) => k.equipment[key] === undefined).length;
+  const unansweredSeason = Object.keys(SEASONINGS).filter((key) => k.seasonings[key] === undefined).length;
+  const open = unansweredEq > 0 || !k.homeMeals;
+  const hm = k.homeMeals ?? { breakfast: '', lunch: '', dinner: '' };
+  const sel = (name, cur) =>
+    `<select name="${name}"><option value="" ${cur === '' ? 'selected' : ''}>—</option>${[0, 1, 2, 3, 4, 5, 6, 7]
+      .map((n) => `<option value="${n}" ${cur === n ? 'selected' : ''}>${n}回</option>`)
+      .join('')}</select>`;
+  return `<section class="card ${open ? 'hero' : ''}"><details ${open ? 'open' : ''}><summary><b>台所の質問</b>${
+    open ? ` <span class="tag warn">未回答 ${unansweredEq + unansweredSeason + (k.homeMeals ? 0 : 1)} 項目</span>` : ' <span class="tag ok">回答済み</span>'
+  }</summary>
+    <p class="small">答えると、持っている道具だけで作れるレシピにしぼり、足りない調味料を買い出しリストに入れます。チェックしなかったものは「持っていない」として扱います。</p>
+    <form id="kitchenSetup" class="stack">
+      <h3>持っている道具</h3>
+      <div class="chips">${Object.entries(EQUIPMENT_K)
+        .map(([key, v]) => `<label class="chip"><input type="checkbox" name="eq" value="${key}" ${k.equipment[key] ? 'checked' : ''}><span>${esc(v)}</span></label>`)
+        .join('')}</div>
+      <h3>持っている調味料</h3>
+      <div class="chips">${Object.entries(SEASONINGS)
+        .map(([key, v]) => `<label class="chip"><input type="checkbox" name="se" value="${key}" ${k.seasonings[key] ? 'checked' : ''}><span>${esc(v.name)}</span></label>`)
+        .join('')}</div>
+      <h3>1週間に家で食べる回数</h3>
+      <div class="grid3">
+        <label class="field">朝${sel('hm_b', hm.breakfast)}</label>
+        <label class="field">昼${sel('hm_l', hm.lunch)}</label>
+        <label class="field">夜${sel('hm_d', hm.dinner)}</label>
+      </div>
+      <label class="field">買い出しの間隔
+        <select name="interval">${[7, 10, 14].map((n) => `<option value="${n}" ${k.intervalDays === n ? 'selected' : ''}>${n}日ごと</option>`).join('')}</select></label>
+      <button class="primary" type="submit">保存</button>
+    </form></details></section>`;
+}
+
+function pantryCard() {
+  const k = state.kitchen;
+  const today = todayStr();
+  const soon = new Set(expiringSoon(k, today, 2).map((p) => p.id));
+  const groups = ['fridge', 'freezer', 'room']
+    .map((w) => {
+      const items = k.pantry.filter((p) => p.where === w).sort((a, b) => (a.useBy ?? '').localeCompare(b.useBy ?? ''));
+      if (!items.length) return '';
+      return `<h3>${WHERE_LABEL[w]}</h3><ul class="plain">${items
+        .map((p) => {
+          const name = p.kind === 'prepared' ? `作り置き：${RECIPE_BY_ID[p.recipeId]?.name ?? ''}` : FOOD_BY_ID[p.foodId]?.name ?? p.foodId;
+          const amount = p.kind === 'prepared' ? `${p.portions}食分` : `${grams(p.grams)} g`;
+          const past = p.useBy < today;
+          const editing = ui.editPantry === p.id;
+          return `<li class="pantry ${soon.has(p.id) ? 'soon' : ''}"><div><b>${esc(name)}</b> ${amount}
+              ${p.useBy ? `<span class="tag ${past || soon.has(p.id) ? 'warn' : ''}">${past ? '期限切れ' : `${mmdd(p.useBy)}まで`}${p.useByEstimated ? '（目安）' : ''}</span>` : ''}</div>
+            ${
+              editing
+                ? `<form class="row editpantry" data-id="${p.id}"><input name="v" inputmode="decimal" value="${p.kind === 'prepared' ? p.portions : Math.round(p.grams)}" aria-label="残りの量"><span class="small">${p.kind === 'prepared' ? '食' : 'g'}</span><button class="sm primary" type="submit">保存</button></form>`
+                : `<div class="btnrow"><button class="sm" data-action="pantry-edit" data-id="${p.id}">量を直す</button>
+                  ${p.where === 'fridge' ? `<button class="sm" data-action="pantry-freeze" data-id="${p.id}">冷凍に移す</button>` : ''}
+                  <button class="sm link" data-action="pantry-done" data-id="${p.id}">使い切った</button></div>`
+            }</li>`;
+        })
+        .join('')}</ul>`;
+    })
+    .join('');
+  const foodOpts = Object.keys(BUY_INFO)
+    .map((id) => `<option value="${id}">${esc(FOOD_BY_ID[id]?.name ?? id)}</option>`)
+    .join('');
+  const soonList = expiringSoon(k, today, 2).filter((p) => p.kind === 'food');
+  const useSoon = soonList.length
+    ? `<div class="sug"><b>先に使いたい：</b>${esc(soonList.map((p) => FOOD_BY_ID[p.foodId]?.name).join('、'))}
+        ${(() => {
+          const ids = new Set(soonList.map((p) => p.foodId));
+          const rs = RECIPES.filter((r) => !r.prepOnly && r.ingredients.some((i) => ids.has(i.foodId))).slice(0, 3);
+          return rs.length ? `<div class="small">使えるレシピ：${rs.map((r) => `<button class="link" data-action="goto-recipe" data-id="${r.id}">${esc(r.name)}</button>`).join('、')}</div>` : '';
+        })()}</div>`
+    : '';
+  return `<section class="card" id="pantry"><h2>家の在庫</h2>
+    <p class="small">買い出しを終えたときと、レシピで作ったときに自動で増減します。毎日数える必要はありません。期限の「目安」はアプリの仮定なので、パッケージの表示を優先してください。</p>
+    ${useSoon}
+    ${groups || '<p class="muted">まだ何もありません。買い出しリストで買い物を終えると、ここに入ります。</p>'}
+    <details><summary>手で追加する</summary>
+      <form id="addpantry" class="grid3">
+        <label class="field">食材<select name="foodId">${foodOpts}</select></label>
+        <label class="field">量 (g)<input name="grams" inputmode="decimal" required></label>
+        <label class="field">置き場所<select name="where"><option value="">おすすめ</option>${Object.entries(WHERE_LABEL).map(([kk, v]) => `<option value="${kk}">${v}</option>`).join('')}</select></label>
+        <label class="field">期限（任意）<input name="useBy" type="date"></label>
+        <button type="submit">追加</button>
+      </form></details>
+    <details><summary>保存と衛生の基本（厚生労働省）</summary>
+      <ul class="small"><li>冷蔵庫は10℃以下、冷凍庫は−15℃以下が目安。詰めすぎない（7割程度）</li><li>解凍は冷蔵庫の中か電子レンジで（室温に置きっぱなしにしない）</li><li>肉は中心部を75℃で1分以上が加熱の目安</li><li>作り置きは浅い容器に小分けして早く冷まし、温め直しは75℃以上</li><li>時間が経ちすぎたものは、思い切って捨てる</li></ul>
+      ${srcLinks(['mhlw_foodsafety'])}
+    </details>
+  </section>`;
+}
+
+function shoppingCard() {
+  const k = state.kitchen;
+  const sh = k.shopping;
+  if (!sh || sh.completedOn) {
+    return `<section class="card" id="shopping"><h2>買い出しリスト</h2>
+      ${sh?.completedOn ? `<p class="small">前回の買い出し：${mmdd(sh.completedOn)}</p>` : ''}
+      <p class="small">家で食べる回数から、次の${k.intervalDays}日分の自炊メニューを決めて、買うものをまとめます。家にあるものは引きます。</p>
+      ${k.homeMeals ? '<button class="primary" data-action="shop-build">次の買い出しリストを作る</button>' : '<p class="tag warn">先に「台所の質問」で家で食べる回数を入れてください</p>'}
+    </section>`;
+  }
+  const sections = [...new Set(sh.items.map((i) => i.section))];
+  const budget = state.profile.food.budgetPerDayYen;
+  const list = sections
+    .map(
+      (sec) => `<h3>${esc(sec)}</h3><ul class="plain shop">${sh.items
+        .filter((i) => i.section === sec)
+        .map(
+          (i) => `<li><label class="opt"><input type="checkbox" data-action="shop-check" data-id="${i.id}" ${i.checked ? 'checked' : ''}>
+            <b>${esc(i.name)}</b>${i.count ? ` × ${i.count}` : ''}${i.optional ? ' <span class="tag">持っていなければ</span>' : ''}
+            ${i.priceYen != null ? `<span class="muted small">約${yen(i.priceYen)}円</span>` : ''}</label>
+            ${i.needG ? `<div class="muted small">必要 ${grams(i.needG)} g${i.haveG ? `（家に ${grams(i.haveG)} g あり）` : ''}</div>` : ''}
+            ${i.tip ? `<div class="small">${esc(i.tip)}</div>` : ''}</li>`,
+        )
+        .join('')}</ul>`,
+    )
+    .join('');
+  const schedule = sh.schedule
+    .map(
+      (w) => `<div><b>${w.week}週目</b>：${w.plan
+        .map((p) => `<button class="link" data-action="goto-recipe" data-id="${p.recipeId}">${esc(RECIPE_BY_ID[p.recipeId].name)}</button> ${p.servings}食`)
+        .join('、')}</div>`,
+    )
+    .join('');
+  return `<section class="card" id="shopping"><h2>買い出しリスト（${mmdd(sh.createdOn)}作成・${sh.weeks * 7}日分）</h2>
+    <details open><summary>この期間に作るもの</summary><div class="small">${schedule}</div>
+      ${sh.notes.map((n) => `<p class="muted small">${esc(n)}</p>`).join('')}</details>
+    ${list}
+    <p>合計 約 <b>${yen(sh.totalYen)}</b> 円 <span class="tag">目安</span>${budget ? ` <span class="muted small">（1日の食費予算 ${yen(budget)}円 × ${sh.weeks * 7}日 = ${yen(budget * sh.weeks * 7)}円。外食も含めた予算）</span>` : ''}</p>
+    <p class="muted small">値段と1パックの量はアプリの仮定です。肉・魚は2週間もたせるため、買った日に1回分ずつ冷凍する前提にしています。</p>
+    <form id="shopadd" class="row"><input name="name" placeholder="ほかに買うもの（例：牛乳）" aria-label="追加で買うもの"><button type="submit">追加</button></form>
+    <div class="btnrow"><button class="primary" data-action="shop-complete">買い物を終える（チェックしたものを在庫へ）</button>
+      <button class="link" data-action="shop-build">作り直す</button></div>
+  </section>`;
+}
+
+function recipesCard() {
+  const k = state.kitchen;
+  const level = cookingLevel(k.cookLog);
+  const next = nextChallenge(k);
+  const card = (r) => {
+    const t = recipeToTemplate(r, k);
+    const noEquip = r.needs.filter((n) => k.equipment[n] === false);
+    const cm = t ? canMake(k, t) : null;
+    const n = t ? mealNutrients({ items: t.items.filter((i) => !i.rice) }).total : null;
+    const open = ui.openRecipe === r.id;
+    const counts = k.cookLog.filter((c) => c.recipeId === r.id).length;
+    return `<li class="recipe" id="r-${r.id}"><div><b>${esc(r.name)}</b> <span class="tag">${'★'.repeat(r.level)} Lv${r.level}</span>
+        ${r.servings > 1 ? `<span class="tag">${r.servings}食分</span>` : ''} <span class="muted small">約${r.minutes}分${counts ? `・作った回数 ${counts}` : ''}</span></div>
+      ${noEquip.length ? `<div class="small warn-text">持っていない道具：${esc(noEquip.map((x) => EQUIPMENT_K[x]).join('、'))}</div>` : ''}
+      ${cm ? (cm.ok ? '<div class="small ok-text">✓ 家にある食材で作れる</div>' : `<div class="muted small">足りない：${esc(cm.missing.map((m) => FOOD_BY_ID[m.foodId]?.name).join('、'))}</div>`) : ''}
+      ${n && !r.prepOnly ? `<div class="small">1食分（ごはん除く）：${nutrientLine(n)}</div>` : ''}
+      <div class="chips">${r.skills.map((s) => `<span class="tag">${esc(SKILLS[s].name)}</span>`).join('')}</div>
+      <details ${open ? 'open' : ''}><summary>材料と作り方</summary>
+        <h3>材料（${r.servings > 1 ? `1食分。${r.servings}食分作るときは×${r.servings}` : '1食分'}）</h3>
+        <ul class="small">${r.ingredients.map((i) => `<li>${esc(i.display)}</li>`).join('')}${r.withRice ? '<li>ごはん 1膳</li>' : ''}</ul>
+        ${r.seasonings.length ? `<div class="small">調味料：${esc(r.seasonings.map((s) => `${SEASONINGS[s.key].name}${s.amount ? ` ${s.amount}` : ''}`).join('、'))}</div>` : ''}
+        <h3>道具</h3><div class="small">${esc(r.needs.map((x) => EQUIPMENT_K[x]).join('、'))}</div>
+        <h3>作り方</h3><ol class="small">${r.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
+        <div class="sug small"><b>今回のポイント：</b>${esc(r.point)}</div>
+        ${r.skills.includes('meat_safety') ? `<p class="small">肉は中心部75℃で1分以上が目安。切って中まで色が変わっているか確かめる。${srcLinks(['mhlw_foodsafety'])}</p>` : ''}
+        <p class="muted small">栄養は食材の分量から計算（調味料は含まない）。目安です。</p>
+      </details>
+      ${
+        ui.cookForm === r.id
+          ? `<form class="stack cookform" data-id="${r.id}">
+              <div class="grid3">
+                <label class="field">作った量<select name="servings">${[1, 2, 3, 4, 5, 6].map((x) => `<option value="${x}" ${x === r.servings ? 'selected' : ''}>${x}食分</option>`).join('')}</select></label>
+                ${r.prepOnly ? '' : `<label class="field">今食べた<select name="eat"><option value="1">1食</option><option value="0">食べていない</option></select></label>
+                <label class="field">いつ<select name="slot">${SLOT_ORDER.map((s) => `<option value="${s}" ${s === nextSlot(state, todayStr()) ? 'selected' : ''}>${SLOTS[s]}</option>`).join('')}</select></label>`}
+                <label class="field">残りの保存<select name="store"><option value="fridge">冷蔵</option><option value="freezer">冷凍</option></select></label>
+              </div>
+              <div class="btnrow"><button class="primary" type="submit">記録する</button><button type="button" class="link" data-action="cook-cancel">やめる</button></div>
+            </form>`
+          : noEquip.length
+            ? ''
+            : `<div class="btnrow"><button class="sm primary" data-action="cook-open" data-id="${r.id}">作った</button></div>`
+      }
+    </li>`;
+  };
+  const allowed = RECIPES;
+  return `<section class="card" id="recipes"><h2>レシピ（料理レベル ${level}）</h2>
+    ${next ? `<div class="sug"><b>次の挑戦：</b>${esc(next.name)}<div class="small">${esc(next.point)}</div></div>` : ''}
+    <p class="small">一人暮らしの台所にある道具で作れる、簡単なものから並べています。レベルは「そのレベルのレシピを2回作る」と上がります。</p>
+    ${[1, 2, 3, 4]
+      .map((L) => {
+        const rs = allowed.filter((r) => r.level === L);
+        return `<h3>${'★'.repeat(L)} レベル${L}${L > level + 1 ? '（もう少し先）' : ''}</h3><ul class="plain">${rs.map(card).join('')}</ul>`;
+      })
+      .join('')}
+  </section>`;
+}
+
 // ---------------------------------------------------------------- 全体
 
 function layout(inner) {
   const tabs = [
     ['today', '今日'],
     ['record', '記録'],
-    ['review', '振り返り'],
+    ['kitchen', '台所'],
+    ['growth', '成長'],
     ['settings', '設定'],
   ];
-  return `<header class="top"><b>きんトレごはん</b>${ui.flash ? `<span class="flash" role="status">${esc(ui.flash)}</span>` : ''}</header>
+  return `<header class="top"><b>Tsumiage</b>${ui.flash ? `<span class="flash" role="status">${esc(ui.flash)}</span>` : ''}</header>
     <main>${inner}</main>
     <nav class="tabs">${tabs.map(([k, v]) => `<button class="${ui.tab === k ? 'on' : ''}" data-action="goto" data-tab="${k}">${v}</button>`).join('')}</nav>`;
 }
@@ -1034,9 +1359,9 @@ function layout(inner) {
 function render() {
   const y = window.scrollY;
   if (!state.profile.setupDone) {
-    root.innerHTML = `<header class="top"><b>きんトレごはん</b></header><main>${settingsForm(true)}</main>`;
+    root.innerHTML = `<header class="top"><b>Tsumiage</b></header><main>${settingsForm(true)}</main>`;
   } else {
-    const view = { today: todayView, record: recordView, review: reviewView, settings: settingsView }[ui.tab] ?? todayView;
+    const view = { today: todayView, record: recordView, kitchen: kitchenView, growth: growthView, review: growthView, settings: settingsView }[ui.tab] ?? todayView;
     root.innerHTML = layout(view());
   }
   window.scrollTo(0, y);
@@ -1181,6 +1506,61 @@ root.addEventListener('click', (ev) => {
       commit('見送りました（計画は変わりません）');
       break;
     }
+    case 'goto-recipe':
+      ui.tab = 'kitchen';
+      ui.openRecipe = el.dataset.id;
+      render();
+      document.getElementById(`r-${el.dataset.id}`)?.scrollIntoView();
+      break;
+    case 'cook-open':
+      ui.cookForm = el.dataset.id;
+      render();
+      break;
+    case 'cook-cancel':
+      ui.cookForm = null;
+      render();
+      break;
+    case 'pantry-edit':
+      ui.editPantry = el.dataset.id;
+      render();
+      break;
+    case 'pantry-freeze': {
+      const p = state.kitchen.pantry.find((x) => x.id === el.dataset.id);
+      if (p) {
+        p.where = 'freezer';
+        p.useBy = addDaysStr(todayStr(), p.kind === 'prepared' ? PREPARED_DAYS.freezer : 30);
+        p.useByEstimated = true;
+      }
+      commit('冷凍に移しました（期限の目安を延ばしました）');
+      break;
+    }
+    case 'pantry-done':
+      state.kitchen.pantry = state.kitchen.pantry.filter((x) => x.id !== el.dataset.id);
+      commit('在庫から外しました');
+      break;
+    case 'shop-build': {
+      if (state.kitchen.shopping && !state.kitchen.shopping.completedOn && !confirm('今のリストを作り直します。チェックした内容は消えます。よろしいですか？')) break;
+      const plan = buildShoppingPlan(state.kitchen, { allergies: state.profile.food.allergies, dislikes: state.profile.food.dislikes, startDate: todayStr() });
+      if (plan.error) {
+        ui.flash = plan.error;
+        render();
+        break;
+      }
+      state.kitchen.shopping = plan;
+      commit('買い出しリストを作りました');
+      break;
+    }
+    case 'shop-complete': {
+      const n = state.kitchen.shopping?.items.filter((i) => i.checked).length ?? 0;
+      if (!n) {
+        ui.flash = '買ったものにチェックを入れてください';
+        render();
+        break;
+      }
+      completeShopping(state.kitchen, todayStr());
+      commit(`${n}品を在庫に入れました。肉・魚は1回分ずつ冷凍を`);
+      break;
+    }
     case 'goto-menus':
       ui.tab = 'settings';
       render();
@@ -1214,7 +1594,7 @@ root.addEventListener('click', (ev) => {
       const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
       const a2 = document.createElement('a');
       a2.href = URL.createObjectURL(blob);
-      a2.download = `kintore-meshi-${todayStr()}.json`;
+      a2.download = `tsumiage-${todayStr()}.json`;
       a2.click();
       setTimeout(() => URL.revokeObjectURL(a2.href), 1000);
       break;
@@ -1232,6 +1612,12 @@ root.addEventListener('click', (ev) => {
 
 root.addEventListener('change', (ev) => {
   const el = ev.target;
+  if (el.dataset?.action === 'shop-check') {
+    const it = state.kitchen.shopping?.items.find((i) => i.id === el.dataset.id);
+    if (it) it.checked = el.checked;
+    saveState(state);
+    return;
+  }
   if (el.dataset?.action === 'hide-builtin') {
     state.profile.food.hideBuiltin = { ...(state.profile.food.hideBuiltin ?? {}), [el.dataset.id]: !el.checked };
     commit(el.checked ? 'アプリの例も候補に出します' : 'この場所は登録したメニューだけ候補に出します');
@@ -1286,7 +1672,8 @@ root.addEventListener('submit', (ev) => {
       return;
     }
     recordWorkout(state, date, { entries, fatigue });
-    commit('記録しました。次回の提案を確認できます');
+    const prs = personalRecords(state.workouts).events.filter((e) => e.date === date);
+    commit(prs.length ? `自己ベスト更新：${prs.map((e) => e.text).join('、')}` : '記録しました。次回の提案を確認できます');
   } else if (form.id === 'addmeal') {
     const date = form.dataset.date;
     const r = readAddMeal(form);
@@ -1320,6 +1707,60 @@ root.addEventListener('submit', (ev) => {
     });
     ui.editingMeal = null;
     commit('直しました');
+  } else if (form.id === 'kitchenSetup') {
+    const fd = new FormData(form);
+    const k = state.kitchen;
+    const eq = new Set(fd.getAll('eq'));
+    const se = new Set(fd.getAll('se'));
+    k.equipment = Object.fromEntries(Object.keys(EQUIPMENT_K).map((key) => [key, eq.has(key)]));
+    k.seasonings = Object.fromEntries(Object.keys(SEASONINGS).map((key) => [key, se.has(key)]));
+    const v = (n) => (fd.get(n) === '' ? null : Number(fd.get(n)));
+    const hm = { breakfast: v('hm_b'), lunch: v('hm_l'), dinner: v('hm_d') };
+    k.homeMeals = Object.values(hm).every((x) => x == null) ? null : { breakfast: hm.breakfast ?? 0, lunch: hm.lunch ?? 0, dinner: hm.dinner ?? 0 };
+    k.intervalDays = Number(fd.get('interval')) || 14;
+    commit('台所の情報を保存しました');
+  } else if (form.classList.contains('cookform')) {
+    const fd = new FormData(form);
+    const date = todayStr();
+    const recipeId = form.dataset.id;
+    const r = cookRecipe(state.kitchen, {
+      date,
+      recipeId,
+      servings: Number(fd.get('servings')),
+      eatNow: Number(fd.get('eat') ?? 0),
+      slot: fd.get('slot') ?? null,
+      store: fd.get('store'),
+    });
+    if (r.record) state.meals[date] = [...mealsOn(state, date), r.record];
+    ui.cookForm = null;
+    const skillNames = RECIPE_BY_ID[recipeId].skills.map((s) => SKILLS[s].name).join('・');
+    commit(`記録しました（${skillNames} +1）${r.prepared ? `。残り${r.prepared.portions}食は作り置きに` : ''}`);
+  } else if (form.id === 'addpantry') {
+    const fd = new FormData(form);
+    addPantry(state.kitchen, {
+      foodId: fd.get('foodId'),
+      grams: Number(fd.get('grams')) || 0,
+      where: fd.get('where') || undefined,
+      date: todayStr(),
+      useBy: fd.get('useBy') || null,
+    });
+    commit('在庫に追加しました');
+  } else if (form.classList.contains('editpantry')) {
+    const p = state.kitchen.pantry.find((x) => x.id === form.dataset.id);
+    const v = Number(new FormData(form).get('v'));
+    if (p && Number.isFinite(v)) {
+      if (p.kind === 'prepared') p.portions = v;
+      else p.grams = v;
+      state.kitchen.pantry = state.kitchen.pantry.filter((x) => (x.kind === 'prepared' ? x.portions > 0 : x.grams > 0));
+    }
+    ui.editPantry = null;
+    commit('量を直しました');
+  } else if (form.id === 'shopadd') {
+    const name = String(new FormData(form).get('name') ?? '').trim();
+    if (name && state.kitchen.shopping) {
+      state.kitchen.shopping.items.push({ id: `si_${Date.now().toString(36)}`, name, section: 'その他', checked: false, manual: true });
+      commit('追加しました');
+    }
   } else if (form.id === 'addplace') {
     const fd = new FormData(form);
     const place = addPlace(state, { name: fd.get('name'), kind: fd.get('kind') });

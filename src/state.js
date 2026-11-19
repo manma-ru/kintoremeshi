@@ -2,8 +2,11 @@
 // 「普段の設定」(profile) と「その日だけの変更」(overrides[date]) は別々に持つ。
 // 「予定」(planSnapshot) と「実績」(actual) も別々に持つ。
 import { buildWeekPlan, buildSession, DOW_KEYS, EXERCISE_BY_ID } from './training.js';
-import { TEMPLATE_BY_ID, recordFromTemplate, SLOT_ORDER, BUILTIN_PLACES, menuToTemplate, candidatePool, KIND_NEEDS_CHECK } from './meals.js';
+import { TEMPLATE_BY_ID, recordFromTemplate, SLOT_ORDER, BUILTIN_PLACES, menuToTemplate, candidatePool, KIND_NEEDS_CHECK, recipeToTemplate } from './meals.js';
+import { defaultKitchen, preparedTemplates, cookRecipe, eatPrepared } from './kitchen.js';
+import { RECIPES } from './recipes.js';
 
+// 保存場所の名前。アプリ名を変えても、これまでのデータを読めるように古い名前のままにしている
 export const STORAGE_KEY = 'kintore-meshi/v1';
 
 export function defaultState() {
@@ -51,6 +54,8 @@ export function defaultState() {
     customFoods: [], // 商品ラベルから登録したもの
     placesCustom: [], // 自分で足した場所 [{ id, name, kind }]
     menus: [], // 場所ごとに登録したメニュー（meals.js の menuToTemplate を参照）
+    kitchen: defaultKitchen(), // 道具・調味料・在庫・作り置き・買い出し・料理の記録（kitchen.js）
+    badgesSeen: [], // 見たバッジ（新しいバッジに印をつけるため）
   };
 }
 
@@ -221,7 +226,16 @@ export function confirmCandidate(state, date, slot, edits = {}) {
   const templateId = state.selected[date]?.[slot] ?? edits.templateId;
   const t = templateLookup(state)[templateId];
   if (!t) return state;
-  const rec = recordFromTemplate(t, slot, edits);
+  let rec;
+  if (t.prepared) {
+    // 作り置きを食べた：在庫の残りを1食減らす
+    rec = eatPrepared(state.kitchen, { pantryId: t.pantryId, slot });
+  } else if (t.recipeId) {
+    // レシピを作って食べた：材料を在庫から引き、余りは作り置きに
+    rec = cookRecipe(state.kitchen, { date, recipeId: t.recipeId, eatNow: 1, slot }).record;
+  }
+  if (rec) rec = { ...rec, ...edits, id: rec.id };
+  else rec = recordFromTemplate(t, slot, edits);
   state.meals[date] = [...mealsOn(state, date), rec];
   clearCandidate(state, date, slot);
   return state;
@@ -295,11 +309,26 @@ export function placeName(state, id) {
 
 /** 候補を id で探す表（アプリの例 + 登録メニュー） */
 export function templateLookup(state) {
-  return { ...TEMPLATE_BY_ID, ...Object.fromEntries((state.menus ?? []).map((m) => [m.id, menuToTemplate(m)])) };
+  const k = state.kitchen ?? defaultKitchen();
+  const recipes = RECIPES.filter((r) => !r.prepOnly)
+    .map((r) => recipeToTemplate(r, k) ?? recipeToTemplate(r, {}))
+    .map((t) => [t.id, t]);
+  return {
+    ...TEMPLATE_BY_ID,
+    ...Object.fromEntries(recipes),
+    ...Object.fromEntries(preparedTemplates(k).map((t) => [t.id, t])),
+    ...Object.fromEntries((state.menus ?? []).map((m) => [m.id, menuToTemplate(m)])),
+  };
 }
 
 export function poolFor(state) {
-  return candidatePool({ menus: state.menus ?? [], hideBuiltin: state.profile.food.hideBuiltin ?? {} });
+  const k = state.kitchen ?? defaultKitchen();
+  return candidatePool({
+    menus: state.menus ?? [],
+    hideBuiltin: state.profile.food.hideBuiltin ?? {},
+    kitchen: k,
+    extra: preparedTemplates(k),
+  });
 }
 
 export function addPlace(state, { name, kind }) {

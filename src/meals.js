@@ -1,5 +1,6 @@
 // 食事候補（ルールベース）。栄養は成分表の値 × 分量で計算し、価格はアプリの仮定値。
 import { FOOD_BY_ID, mealNutrients, addNutrients, dayTotals, zeroNutrients } from './nutrition.js';
+import { RECIPES, SEASONINGS, BUY_INFO, BUY_ALIAS } from './recipes.js';
 
 export const PLACES = { cook: '自炊', cafeteria: '学食', conveni: 'コンビニ' };
 /** 最初からある場所。自分で場所を足すこともできる（state.placesCustom） */
@@ -23,8 +24,8 @@ const fRaw = (foodId, grams, display) => ({ ...f(foodId, grams, display), eatenR
 
 // priceYen はアプリの仮定値（地域・店で大きく違う）。needsIngredientCheck は原材料を自分で確かめられない料理。
 // 分量（grams）は「よくある1人前」をアプリが仮定した値。実際の商品ラベルや計量で直して記録できる。
-export const MEAL_TEMPLATES = [
-  // ---- 自炊
+const FIXED_TEMPLATES = [
+  // ---- 自炊（レシピに置き換えたので候補には使わない）
   {
     id: 'cook_chicken_rice',
     name: '鶏むね肉のソテー＋ごはん＋ブロッコリー',
@@ -318,6 +319,53 @@ export const MEAL_TEMPLATES = [
   },
 ];
 
+/** 1食分の材料費の概算（買う単位の値段 ÷ 量 × 使う量）。値段はアプリの仮定 */
+export function ingredientCostYen(items) {
+  let yen = 0;
+  for (const i of items) {
+    const info = BUY_INFO[BUY_ALIAS[i.foodId] ?? i.foodId];
+    if (info && i.grams > 0) yen += (info.priceYen / info.pack[0]) * i.grams;
+  }
+  return yen;
+}
+
+/**
+ * レシピ → 食事の候補。ごはんは炊飯器があれば「生米75g分」、なければパックごはん。
+ * kitchen.equipment で「ない」と答えた道具が必要なレシピは null（候補にしない）。
+ */
+export function recipeToTemplate(recipe, kitchen = {}) {
+  const eq = kitchen.equipment ?? {};
+  if (recipe.needs.some((n) => eq[n] === false)) return null;
+  const riceByCooker = eq.ricecooker !== false;
+  const items = recipe.ingredients.map((i) => ({ ...i }));
+  if (recipe.withRice) {
+    items.push(
+      riceByCooker
+        ? { basis: 'food', foodId: 'rice_raw', grams: 75, display: 'ごはん 1膳（生米75g分・冷凍ごはんでOK）', rice: true }
+        : { basis: 'food', foodId: 'rice_cooked', grams: 180, display: 'パックごはん 1個（180g）', rice: true },
+    );
+  }
+  const seasoningAllergens = recipe.seasonings.flatMap((s) => SEASONINGS[s.key]?.allergens ?? []);
+  return {
+    id: recipe.id,
+    recipeId: recipe.id,
+    name: recipe.name,
+    place: 'cook',
+    slots: recipe.slots,
+    priceYen: Math.round(ingredientCostYen(items)),
+    items,
+    extraAllergens: [...new Set(seasoningAllergens)],
+    level: recipe.level,
+    servings: recipe.servings,
+    uncheckedEquipment: recipe.needs.filter((n) => eq[n] === undefined),
+  };
+}
+
+export const MEAL_TEMPLATES = [
+  ...RECIPES.filter((r) => !r.prepOnly).map((r) => recipeToTemplate(r)),
+  ...FIXED_TEMPLATES.filter((t) => t.place !== 'cook'),
+];
+
 export const TEMPLATE_BY_ID = Object.fromEntries(MEAL_TEMPLATES.map((t) => [t.id, t]));
 
 // データに付けてあるアレルゲン名の一覧。これに当たる語はタグで判定し、名前の部分一致は使わない（豆乳≠乳）
@@ -412,8 +460,10 @@ export function menuToTemplate(menu) {
 }
 
 /** 候補の母集団：アプリの例（場所ごとに非表示にできる）＋ 自分で登録したメニュー */
-export function candidatePool({ menus = [], hideBuiltin = {} } = {}) {
-  return [...MEAL_TEMPLATES.filter((t) => !hideBuiltin[t.place]), ...menus.map(menuToTemplate)];
+export function candidatePool({ menus = [], hideBuiltin = {}, kitchen = null, extra = [] } = {}) {
+  const recipes = hideBuiltin.cook ? [] : RECIPES.filter((r) => !r.prepOnly).map((r) => recipeToTemplate(r, kitchen ?? {})).filter(Boolean);
+  const fixed = MEAL_TEMPLATES.filter((t) => t.place !== 'cook' && !hideBuiltin[t.place]);
+  return [...extra, ...recipes, ...fixed, ...menus.map(menuToTemplate)];
 }
 
 /** 似ている料理（アプリの例）を量の倍率つきでコピーして、メニューの品目にする */
@@ -477,6 +527,15 @@ export function suggestMeals(ctx) {
       score += 0.3; // アプリ独自：自分で登録した実際のメニューを少し優先
       reasons.push('自分で登録したメニュー');
     }
+    if (t.prepared) {
+      score += 1; // 作り置きは傷む前に先に使う
+      reasons.push(`作り置きを先に使う（目安 ${Number(t.useBy.slice(5, 7))}/${Number(t.useBy.slice(8, 10))} まで）`);
+    }
+    const hint = ctx.hint ? ctx.hint(t) : null;
+    if (hint?.ok) {
+      score += 0.4; // 家にある食材で作れるものを優先（買い足し不要・食品ロスを減らす）
+      reasons.push('家にある食材で作れる');
+    }
     if (t.nutritionUnknown) {
       reasons.push('栄養は未登録のため、たんぱく質などでは比べていません');
       out.push({ template: t, nutrients: n, nutritionUnknown: true, priceYen: t.priceYen, allergens: mealAllergens(t),
@@ -500,6 +559,7 @@ export function suggestMeals(ctx) {
     }
     out.push({
       template: t,
+      hint,
       nutrients: n,
       priceYen: t.priceYen,
       allergens: mealAllergens(t),

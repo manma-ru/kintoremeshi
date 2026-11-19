@@ -119,6 +119,22 @@ export const SOURCES = {
     note: '表示義務は えび・かに・くるみ・小麦・そば・卵・乳・落花生 の8品目。表示が推奨されるだけの品目は表示されないことがある。今後品目が追加される可能性がある。',
     verified: false,
   },
+  mhlw_foodsafety: {
+    title: '家庭でできる食中毒予防の6つのポイント（家庭を原因とする食中毒の防止について）',
+    org: '厚生労働省',
+    year: 1997,
+    url: 'https://www.mhlw.go.jp/web/t_doc?dataId=00ta5910&dataType=1&pageNo=1',
+    note: '冷蔵庫は10℃以下・冷凍庫は−15℃以下が目安。解凍は冷蔵庫の中や電子レンジで。加熱は中心部75℃で1分間以上が目安。残った食品は浅い容器に小分けし、温め直しは75℃以上。生の肉や魚を切った包丁・まな板は洗ってから生で食べるものに使う。',
+    verified: true,
+  },
+  lally2010_habit: {
+    title: 'How are habits formed: Modelling habit formation in the real world（Lally P ほか, Eur J Soc Psychol 40(6):998-1009）',
+    org: 'European Journal of Social Psychology',
+    year: 2010,
+    url: 'https://doi.org/10.1002/ejsp.674',
+    note: '行動が自動的になるまでの日数は人によって大きく違い（18〜254日、中央値66日）、1回やらなかった日があっても習慣の形成にはほとんど影響しなかった。ただし、ばらつきが大きい人は習慣になりにくかった。',
+    verified: false,
+  },
   app: {
     title: 'アプリ独自の調整',
     org: 'このアプリ',
